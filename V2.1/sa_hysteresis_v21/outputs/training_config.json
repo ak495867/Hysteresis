@@ -1,0 +1,7 @@
+{
+  "stress_threshold": 0.016866931691765785,
+  "device": "cuda",
+  "epochs": 30,
+  "lookback": 32,
+  "horizon": 1
+}
