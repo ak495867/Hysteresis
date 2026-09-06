@@ -17,9 +17,14 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 SEED = 42
+FORCE_CPU = os.environ.get('SA_FORCE_CPU', '0') == '1'
 random.seed(SEED)
 np.random.seed(SEED)
-torch.manual_seed(SEED)
+if not FORCE_CPU:
+    try:
+        torch.manual_seed(SEED)
+    except Exception:
+        pass
 
 ROOT = Path('/content/sa_hysteresis_v21') if Path('/content').exists() else Path.cwd() / 'sa_hysteresis_v21'
 DATA_DIR = ROOT / 'data'
@@ -52,7 +57,13 @@ N_FEATURES = 10
 LATENT = 24
 MEMORY = 16
 COST_BPS = 5.0
-DEVICE = 'cpu' if os.environ.get('SA_FORCE_CPU', '0') == '1' else ('cuda' if torch.cuda.is_available() else 'cpu')
+if FORCE_CPU:
+    DEVICE = 'cpu'
+else:
+    try:
+        DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+    except Exception:
+        DEVICE = 'cpu'
 
 
 def download_market_data():
