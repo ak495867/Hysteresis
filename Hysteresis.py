@@ -355,7 +355,7 @@ def main():
     print(json.dumps({'metrics': results, 'metadata': metadata}, indent=2))
 
 
-if __name__ == '__main__':
+if False:
     main()
 
 import json
