@@ -1,3 +1,4 @@
+import os
 import json
 import math
 import random
@@ -51,7 +52,7 @@ N_FEATURES = 10
 LATENT = 24
 MEMORY = 16
 COST_BPS = 5.0
-DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+DEVICE = 'cpu' if os.environ.get('SA_FORCE_CPU', '0') == '1' else ('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 def download_market_data():
@@ -201,22 +202,23 @@ class SAHysteresisV21(nn.Module):
         for step in range(steps):
             z = encoded[:, step]
             combined = torch.cat([z, impact_memory, recovery_memory], dim=-1)
-            gate = torch.sigmoid(self.gate(combined)).squeeze(-1)
-            impact_alpha = self.alpha_impact(combined)
-            impact_beta = 0.03 + 0.97 * self.beta_impact(combined)
-            recovery_alpha = self.alpha_recovery(combined)
-            recovery_beta = 0.03 + 0.97 * self.beta_recovery(combined)
+            combined = torch.nan_to_num(combined, nan=0.0, posinf=10.0, neginf=-10.0).clamp(-10.0, 10.0)
+            gate = torch.sigmoid(torch.clamp(self.gate(combined), -20.0, 20.0)).squeeze(-1)
+            impact_alpha = torch.nan_to_num(self.alpha_impact(combined), nan=0.0, posinf=5.0, neginf=0.0).clamp(0.0, 5.0)
+            impact_beta = 0.03 + 0.97 * self.beta_impact(combined).clamp(0.0, 1.0)
+            recovery_alpha = torch.nan_to_num(self.alpha_recovery(combined), nan=0.0, posinf=5.0, neginf=0.0).clamp(0.0, 5.0)
+            recovery_beta = 0.03 + 0.97 * self.beta_recovery(combined).clamp(0.0, 1.0)
             shock_abs = shocks[:, step].abs().unsqueeze(-1)
-            impact_memory = impact_memory + impact_alpha * shock_abs - impact_beta * impact_memory
-            recovery_memory = recovery_memory + recovery_alpha * impact_memory - recovery_beta * recovery_memory
-            impact_state = torch.cat([z, impact_memory], dim=-1)
-            recovery_state = torch.cat([z, recovery_memory], dim=-1)
-            impact_q = self.impact_q(impact_state)
-            impact_k = self.impact_k(impact_state)
-            recovery_q = self.recovery_q(recovery_state)
-            recovery_k = self.recovery_k(recovery_state)
-            impact_logits = torch.einsum('bif,bjf->bij', impact_q, impact_k) / math.sqrt(impact_q.shape[-1])
-            recovery_logits = torch.einsum('bif,bjf->bij', recovery_q, recovery_k) / math.sqrt(recovery_q.shape[-1])
+            impact_memory = torch.nan_to_num(impact_memory + impact_alpha * shock_abs - impact_beta * impact_memory, nan=0.0, posinf=10.0, neginf=-10.0).clamp(-10.0, 10.0)
+            recovery_memory = torch.nan_to_num(recovery_memory + recovery_alpha * impact_memory - recovery_beta * recovery_memory, nan=0.0, posinf=10.0, neginf=-10.0).clamp(-10.0, 10.0)
+            impact_state = torch.nan_to_num(torch.cat([z, impact_memory], dim=-1), nan=0.0, posinf=10.0, neginf=-10.0).clamp(-10.0, 10.0)
+            recovery_state = torch.nan_to_num(torch.cat([z, recovery_memory], dim=-1), nan=0.0, posinf=10.0, neginf=-10.0).clamp(-10.0, 10.0)
+            impact_q = torch.nan_to_num(self.impact_q(impact_state), nan=0.0, posinf=10.0, neginf=-10.0).clamp(-10.0, 10.0)
+            impact_k = torch.nan_to_num(self.impact_k(impact_state), nan=0.0, posinf=10.0, neginf=-10.0).clamp(-10.0, 10.0)
+            recovery_q = torch.nan_to_num(self.recovery_q(recovery_state), nan=0.0, posinf=10.0, neginf=-10.0).clamp(-10.0, 10.0)
+            recovery_k = torch.nan_to_num(self.recovery_k(recovery_state), nan=0.0, posinf=10.0, neginf=-10.0).clamp(-10.0, 10.0)
+            impact_logits = torch.nan_to_num(torch.einsum('bif,bjf->bij', impact_q, impact_k) / math.sqrt(impact_q.shape[-1]), nan=0.0, posinf=20.0, neginf=-20.0).clamp(-20.0, 20.0)
+            recovery_logits = torch.nan_to_num(torch.einsum('bif,bjf->bij', recovery_q, recovery_k) / math.sqrt(recovery_q.shape[-1]), nan=0.0, posinf=20.0, neginf=-20.0).clamp(-20.0, 20.0)
             impact_graph = torch.softmax(impact_logits, dim=-1)
             recovery_graph = torch.softmax(recovery_logits, dim=-1)
             impact_flow = torch.einsum('bij,bj->bi', impact_graph, shocks[:, step])
@@ -224,10 +226,11 @@ class SAHysteresisV21(nn.Module):
             drift = self.drift(combined)
             scale = self.noise(combined)
             forcing = gate.unsqueeze(-1) * impact_flow.unsqueeze(-1) + (1.0 - gate).unsqueeze(-1) * recovery_flow.unsqueeze(-1)
-            state = z + 0.05 * (drift + scale * forcing)
+            state = torch.nan_to_num(z + 0.05 * (drift + scale * forcing), nan=0.0, posinf=10.0, neginf=-10.0).clamp(-10.0, 10.0)
             gate_last = gate
         final_state = torch.cat([state, impact_memory, recovery_memory], dim=-1)
-        output = self.head(final_state)
+        output = torch.nan_to_num(self.head(final_state), nan=0.0, posinf=10.0, neginf=-10.0).clamp(-10.0, 10.0)
+        gate_last = torch.nan_to_num(gate_last, nan=0.5, posinf=1.0, neginf=0.0).clamp(1e-6, 1.0 - 1e-6)
         return output, gate_last, impact_graph, recovery_graph, impact_memory, recovery_memory
 
 
@@ -258,16 +261,19 @@ def train_model(train, valid, n_assets):
         for xb, ub, yb, db in loader:
             xb, ub, yb, db = xb.to(DEVICE), ub.to(DEVICE), yb.to(DEVICE), db.to(DEVICE)
             output, gate, impact_graph, recovery_graph, impact_memory, recovery_memory = model(xb, ub)
-            stress_target = (db >= stress_threshold).float().unsqueeze(-1).expand_as(gate)
+            stress_target = (db >= stress_threshold).float().unsqueeze(-1).expand_as(gate).clamp(0.0, 1.0)
             forecast_loss = huber_nll(yb, output)
-            gate_loss = nn.functional.binary_cross_entropy(gate, stress_target)
+            gate_loss = nn.functional.binary_cross_entropy(gate.clamp(1e-6, 1.0 - 1e-6), stress_target)
             impact_sparsity = impact_graph.abs().mean()
             recovery_sparsity = recovery_graph.abs().mean()
             memory_penalty = impact_memory.pow(2).mean() + recovery_memory.pow(2).mean()
             confidence = torch.sigmoid(output[:, :, 3])
             confidence_penalty = ((confidence - torch.exp(-torch.abs(output[:, :, 1]))).pow(2)).mean()
             loss = forecast_loss + 0.05 * gate_loss + 0.005 * impact_sparsity + 0.005 * recovery_sparsity + 0.0005 * memory_penalty + 0.01 * confidence_penalty
-            optimizer.zero_grad()
+            if not torch.isfinite(loss):
+                optimizer.zero_grad(set_to_none=True)
+                continue
+            optimizer.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
@@ -280,7 +286,7 @@ def train_model(train, valid, n_assets):
             dv = torch.tensor(dispersion_valid).to(DEVICE)
             ov, gv, igv, rgv, imv, rmv = model(xv, uv)
             validation_loss = float(huber_nll(yv, ov).cpu())
-            validation_gate = float(nn.functional.binary_cross_entropy(gv, (dv >= stress_threshold).float().unsqueeze(-1).expand_as(gv)).cpu())
+            validation_gate = float(nn.functional.binary_cross_entropy(gv.clamp(1e-6, 1.0 - 1e-6), (dv >= stress_threshold).float().unsqueeze(-1).expand_as(gv).clamp(0.0, 1.0)).cpu())
             total_validation = validation_loss + 0.05 * validation_gate
         history.append({'epoch': epoch + 1, 'train_loss': float(np.mean(losses)), 'valid_loss': total_validation})
         if total_validation < best_loss:
